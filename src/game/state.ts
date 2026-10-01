@@ -2,14 +2,16 @@ export const MAG = 40;
 export const FIRE_INTERVAL = 5 / 24; // 24 splinters in 5s
 export const DMG = 5;
 export const PARRY_WINDOW = 1;
-export const PARRY_CD = 5;
-export const BUFF_TIME = 6;
+export const PARRY_CD = 9; // starts on activation
+export const BUFF_TIME = 2;
+export const PARRY_DMG = 10; // damage of a parried (reflected) bullet
+export const MAX_HP = 150;
 export const DASH_CD = 2;
 export const AIR_JUMPS = 2; // + 1 from the ground = 3
 export const AIR_DASHES = 4;
 export const BOMB_CD = 3;
 export const BOMB_CD_BUFF = 2;
-export const TABLE_HP = 10;
+export const TABLE_HP = 5; // brown tables (halved)
 export const TABLE_CAP = 30;
 export const BOSS_HITS = 200;
 export const BOSS_WARN = 10;
@@ -27,11 +29,11 @@ export const TUT_STEPS: { title: string; text: string; enter?: boolean }[] = [
   { title: "Dash", text: "Press Q to dash (works in the air too)." },
   { title: "Grapple", text: "Look at a wall or furniture and HOLD C to swing on a rope." },
   { title: "Scope", text: "HOLD RIGHT CLICK to scope in, then SCROLL the mouse wheel to change zoom." },
-  { title: "Brown tables", text: "Brown tables are the normal enemies — they hop around and shoot splinters. LEFT CLICK to shoot this one. R reloads." },
+  { title: "Brown tables", text: "Brown tables are the normal enemies — they hop around and shoot splinters. LEFT CLICK to shoot this one: your splinters explode on impact and hurt everything nearby. R reloads (on the ground). In the air, R is a GROUND POUND." },
   { title: "Bombs", text: "Press F to throw a bomb. It explodes in a big area. Blow this table up!" },
-  { title: "Parry", text: "This table shoots back! Press E right before a bullet hits you to PARRY it — you get a power boost (infinite ammo, 2x damage)." },
+  { title: "Parry", text: "This table shoots back! Press E right before a bullet hits you to PARRY it — the reflected shot deals 10 damage and you get a 2 second power boost (infinite ammo, 2x damage). Parry has a 9s cooldown." },
   { title: "Blue tables", text: "Blue tables are fast chasers. They rush at you and explode on contact. Shoot them before they reach you!" },
-  { title: "The Boss", text: "After you clear every table, the huge RED boss drops from the ceiling (stay out of the red circle!). He shoots, drops swords that stun you, throws plates, sends shockwaves you must JUMP over, and summons minions. 5 seconds in, your parry gets COMPROMISED. Press ENTER to finish.", enter: true },
+  { title: "The Boss", text: "After you clear every table, the huge RED boss drops from the ceiling (stay out of the red circle!). He shoots, drops swords that stun you, stomps out expanding shockwaves you must JUMP over, and summons minions. 5 seconds in, your parry gets COMPROMISED. Press ENTER to finish.", enter: true },
 ];
 
 export const G = {
@@ -39,7 +41,10 @@ export const G = {
   mode: "game" as Mode,
   stage: "tables" as Stage,
   locked: false,
-  playerHp: 100,
+  playerHp: MAX_HP,
+  slamCd: 0,
+  slamming: false,
+  bounceWin: 0,
   ammo: MAG,
   reloading: 0,
   parryWin: 0,
@@ -85,7 +90,7 @@ export const G = {
 
 export function resetGame(mode: Mode = G.mode) {
   Object.assign(G, {
-    mode, stage: "tables", playerHp: 100, ammo: MAG, reloading: 0, parryWin: 0, parryCd: 0, buff: 0,
+    mode, stage: "tables", playerHp: MAX_HP, slamCd: 0, slamming: false, bounceWin: 0, ammo: MAG, reloading: 0, parryWin: 0, parryCd: 0, buff: 0,
     dashCd: 0, bombCd: 0, airJumps: AIR_JUMPS, airDashes: AIR_DASHES, wallrun: false, grappling: false,
     hitFlash: 0, hurtFlash: 0, parryFlash: 0, redFlash: 0, shake: 0, alive: 1, bluesAlive: 0, kills: 0, capReached: false,
     bossWarn: 0, bossHits: 0, bossTime: 0, parryLocked: false, compromisedT: 0, stun: 0, bombBig: 0, countdown: 0,
