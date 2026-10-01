@@ -124,7 +124,7 @@ function segSolids(a: THREE.Vector3, b: THREE.Vector3) {
   }
   return best;
 }
-const _la = new THREE.Vector3(), _lb = new THREE.Vector3(), _bmin = new THREE.Vector3(), _bmax = new THREE.Vector3();
+const _bq = new THREE.Vector3(), _la = new THREE.Vector3(), _lb = new THREE.Vector3(), _bmin = new THREE.Vector3(), _bmax = new THREE.Vector3();
 // segment vs a (yaw-rotated) table body box; s = table scale, y = feet height
 function segTable(a: THREE.Vector3, b: THREE.Vector3, at: THREE.Vector3, y: number, yaw: number, s: number) {
   _la.subVectors(a, at).setY(a.y - y).applyAxisAngle(UP, -yaw);
@@ -382,14 +382,14 @@ export function World() {
   };
   const distToBossBox = (at: THREE.Vector3) => {
     bossBox(_mn, _mx);
-    return tmpV.copy(at).clamp(_mn, _mx).distanceTo(at);
+    return _bq.copy(at).clamp(_mn, _mx).distanceTo(at);
   };
   // splinter blast: equal damage to everything inside (never the shooter)
   const bulletExplode = (at: THREE.Vector3, dmg: number, direct: Table | null, directBlue: (typeof blues)[number] | null, directBoss: boolean) => {
     let any = false;
     for (const t of tables) {
       if (!t.alive) continue;
-      if (t === direct || t.pos.distanceTo(tmpV.copy(at).setY(at.y)) < BULLET_AOE_R + 3 * t.s && Math.abs(at.y - (t.pos.y + 1.7 * t.s)) < BULLET_AOE_R + 2 * t.s) {
+      if (t === direct || Math.hypot(t.pos.x - at.x, t.pos.z - at.z) < BULLET_AOE_R + 3 * t.s && Math.abs(at.y - (t.pos.y + 1.7 * t.s)) < BULLET_AOE_R + 2 * t.s) {
         hitTable(t, dmg);
         any = true;
       }
@@ -594,9 +594,46 @@ export function World() {
       clearArena();
     }
 
+    const home = G.phase === "home";
     const targetFov = G.scoped ? G.zoomFov : 80;
-    cam.fov = THREE.MathUtils.lerp(cam.fov, targetFov, 1 - Math.exp(-14 * dt));
+    cam.fov = home ? 42 : THREE.MathUtils.lerp(cam.fov, targetFov, 1 - Math.exp(-14 * dt));
     cam.updateProjectionMatrix();
+
+    // --- home screen showcase: rotating isometric camera, invincible brown tables shooting each other ---
+    if (home) {
+      demoAng.current += dt * 0.12;
+      const a = demoAng.current;
+      cam.position.set(Math.cos(a) * 230, 170, Math.sin(a) * 230);
+      cam.lookAt(0, 0, 0);
+      if (aliveCount() < 12) {
+        const t = spawnTable(randomFloor(new THREE.Vector3(9999, 0, 9999)));
+        if (t) t.passive = true;
+      }
+      const list = tables.filter((t) => t.alive);
+      for (const t of list) {
+        const bp = t.pos;
+        const toT = tmpV.copy(t.target).sub(bp).setY(0);
+        if (toT.length() < 4) t.target.copy(randomFloor(bp));
+        else bp.addScaledVector(toT.normalize(), 30 * dt);
+        t.jumpT -= dt;
+        if (t.jumpT <= 0 && bp.y <= 0) { t.vy = JUMP_V; t.jumpT = 2 + Math.random() * 3; }
+        t.vy -= GRAVITY * dt;
+        bp.y = Math.max(0, bp.y + t.vy * dt);
+        if (bp.y <= 0 && t.vy < 0) t.vy = 0;
+        for (const s of SOLIDS) if (s.y0 < 5 && bp.y < s.y1) pushOut(bp, s, 3 * t.s);
+        clampCircle(bp, 3 * t.s);
+        t.bob += dt * 6;
+        const foe = list[(list.indexOf(t) + 1 + Math.floor(t.bob / 20)) % list.length]!;
+        if (foe !== t) t.yaw = Math.atan2(foe.pos.x - bp.x, foe.pos.z - bp.z);
+        t.shootT -= dt;
+        if (t.shootT <= 0 && foe !== t) {
+          t.shootT = 0.5 + Math.random() * 0.6;
+          const aim = foe.pos.clone().setY(foe.pos.y + 2 * foe.s).sub(bp).setY(foe.pos.y + 2 * foe.s - (bp.y + 3.2 * t.s)).normalize();
+          const from = bp.clone().setY(bp.y + 3.2 * t.s).addScaledVector(aim, 5 * t.s);
+          spawnBullet(botPool, from, aim.multiplyScalar(BOT_BULLET_SPEED * 0.4), 0, 2);
+        }
+      }
+    }
 
     if (G.phase === "playing" && G.locked && G.countdown > 0) G.countdown = Math.max(0, G.countdown - dt);
     const active = G.phase === "playing" && G.locked && G.countdown <= 0.6;
@@ -1181,6 +1218,17 @@ export function World() {
           const q = bl.pos;
           if (bl.alive && (bl.life <= 0 || q.y < 0 || q.y > ROOM.h || Math.hypot(q.x, q.z) > R)) bl.alive = false;
         }
+        else if (home && !isPlayer) {
+          bl.prev.copy(bl.pos);
+          bl.pos.addScaledVector(bl.vel, dt);
+          bl.life -= dt;
+          let hit = bl.life <= 0 || bl.pos.y <= 0 || Math.hypot(bl.pos.x, bl.pos.z) > R || segSolids(bl.prev, bl.pos) < Infinity;
+          if (!hit) for (const t of tables) if (t.alive && segTable(bl.prev, bl.pos, t.pos, t.pos.y, t.yaw, t.s) < Infinity) { hit = true; break; }
+          if (hit) {
+            bl.alive = false;
+            boomFx(bl.pos.clone().setY(Math.max(0.3, bl.pos.y)), BULLET_AOE_R * 0.6, 0.2);
+          }
+        }
         if (bl.alive && inst) {
           tmpQ.setFromUnitVectors(zAxis, tmpV.copy(bl.vel).normalize());
           tmpM.compose(bl.pos, tmpQ, ONE);
@@ -1280,7 +1328,7 @@ export function World() {
     }
     booms.forEach((bm, i) => {
       const m = boomRefs.current[i];
-      if (active) bm.t = Math.max(0, bm.t - dt);
+      if (active || home) bm.t = Math.max(0, bm.t - dt);
       if (!m) return;
       m.visible = bm.t > 0;
       m.position.copy(bm.pos);
