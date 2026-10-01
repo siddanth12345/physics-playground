@@ -4,7 +4,7 @@ import { Environment, Lightformer } from "@react-three/drei";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { World } from "./World";
-import { G, MAG, PARRY_CD, DASH_CD, BOMB_CD, TABLE_CAP, BOSS_HITS, resetGame, lockPointer, MAP, TUT_STEPS, goHome, finishTutorial } from "./state";
+import { G, MAG, MAX_HP, PARRY_CD, DASH_CD, BOMB_CD, TABLE_CAP, BOSS_HITS, resetGame, lockPointer, MAP, TUT_STEPS, goHome, finishTutorial } from "./state";
 import { ROOM, SOLIDS } from "./Room";
 
 function useTick(ms: number) {
@@ -38,8 +38,8 @@ function MiniMap() {
   for (let i = 0; i < MAP.health.length; i += 2) t.push(<circle key={"h" + i} cx={MAP.health[i]} cy={MAP.health[i + 1]} r={8} fill="none" stroke="var(--crosshair)" strokeWidth={4} />);
   const hx = MAP.px - Math.sin(MAP.yaw) * 30, hz = MAP.pz - Math.cos(MAP.yaw) * 30;
   return (
-    <div className="absolute right-6 top-6 rounded-full border-2 border-hud/30 bg-hud-panel p-3 shadow-2xl">
-      <svg viewBox={`${-R} ${-R} ${2 * R} ${2 * R}`} className="h-[min(68vh,32rem)] w-[min(68vh,32rem)]">
+    <div className="absolute right-6 top-6 rounded-full border border-hud/30 bg-hud-panel p-1 shadow-2xl">
+      <svg viewBox={`${-R} ${-R} ${2 * R} ${2 * R}`} className="h-[min(27.2vh,12.8rem)] w-[min(27.2vh,12.8rem)]">
         <circle cx={0} cy={0} r={R - 2} fill="#e8dcc4" fillOpacity={0.25} stroke="currentColor" strokeWidth={4} />
         {SOLIDS.map((s, i) => (
           <rect key={i} x={s.x - s.hw} y={s.z - s.hd} width={s.hw * 2} height={s.hd * 2} fill={s.c ?? "#8a6a4a"} fillOpacity={0.88} stroke="#e8dcc4" strokeWidth={1.5} />
@@ -123,7 +123,7 @@ function HUD() {
       )}
 
       <div className="absolute bottom-6 left-6 space-y-3 rounded bg-hud-panel p-3">
-        <Bar label="Your Health" value={G.playerHp} tone="crosshair" />
+        <Bar label="Your Health" value={G.playerHp} max={MAX_HP} tone="crosshair" />
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs font-bold uppercase tracking-widest">
           <span className={G.buff > 0 ? "text-shield" : ""}>
             [E] Parry {G.buff > 0 ? `POWER ${G.buff.toFixed(1)}s` : G.parryLocked ? "COMPROMISED" : G.parryWin > 0 ? "ACTIVE" : G.parryCd > 0 ? G.parryCd.toFixed(1) : "ready"}
@@ -131,6 +131,7 @@ function HUD() {
           <span>[Q] Dash {G.dashCd > 0 ? G.dashCd.toFixed(1) : "ready"}</span>
           <span>[F] Bomb {G.bombCd > 0 ? G.bombCd.toFixed(1) : "ready"}</span>
           <span className={G.grappling ? "text-shield" : ""}>[C] Grapple</span>
+          <span className={G.slamming || G.bounceWin > 0 ? "text-shield" : ""}>[R air] Slam {G.bounceWin > 0 ? "R = BOUNCE" : G.slamCd > 0 ? G.slamCd.toFixed(1) : "ready"}</span>
         </div>
         <div className="flex gap-4 text-xs font-bold uppercase tracking-widest">
           <span>Air jumps {G.airJumps}</span>
@@ -178,11 +179,11 @@ const CONTROLS: [string, string][] = [
   ["W A S D", "Move"],
   ["Mouse", "Look around"],
   ["Space", "Jump (3 total) · hold at a wall to wallrun"],
-  ["Left click", "Shoot splinters"],
+  ["Left click", "Shoot exploding splinters (small blast)"],
   ["Right click", "Scope · scroll wheel to zoom"],
-  ["R", "Reload"],
+  ["R", "Reload (ground) · Ground pound (air) · R again after landing to bounce"],
   ["Q", "Dash (4 in the air)"],
-  ["E", "Parry — reflect a bullet for a power boost"],
+  ["E", "Parry — reflect a bullet (10 dmg) + 2s power boost · 9s cooldown"],
   ["F", "Throw a bomb"],
   ["Hold C", "Grapple rope"],
   ["Esc", "Pause menu"],
@@ -191,7 +192,7 @@ const BOTS: [string, string, string][] = [
   ["Green table", "var(--crosshair)", "That's you! A fast, jumping, dashing, grappling table."],
   ["Brown table", "#8a5a33", "Normal enemy. Hops around and shoots splinters. Break one and two more appear — up to 30. Then clear them all."],
   ["Blue table", "#2f6fd6", "Fast chaser. Rushes you and explodes on contact. 20 of them appear when you must clear the tables, and the boss summons more."],
-  ["Red boss", "#b3121b", "Drops from the ceiling. Shoots hard-hitting bullets, drops swords that stun you, throws plates, sends shockwaves you must jump over and compromises your parry after 5 seconds."],
+  ["Red boss", "#b3121b", "Drops from the ceiling. Shoots hard-hitting bullets, drops swords that stun you, stomps out shockwaves you must jump over and compromises your parry after 5 seconds."],
 ];
 
 function ControlsList() {
@@ -216,30 +217,82 @@ function BotList() {
   );
 }
 
+const ADVANCED: [string, string][] = [
+  ["Exploding splinters", "Every left-click splinter explodes where it lands — on a table, the floor or a wall. The blast is one table wide and hits everything inside it for full damage. It never hurts you."],
+  ["Parry timing", "Press E just before an enemy bullet reaches you. You reflect it at the nearest enemy for 10 damage and get a 2 second power boost: infinite ammo, triple fire rate and 2x damage. Cooldown is 9s from the moment you press E. In the boss fight it gets compromised after 5 seconds."],
+  ["Ground pound", "Press R in the air to slam straight down at double bot-bullet speed. Higher drops hit harder: below half the boss height 1.5 tables wide (5 dmg, 1s), up to boss height 3 tables (5 dmg, 2s), up to 2x boss height 4 tables (10 dmg, 5s), above that 1.5 boss-table lengths (25 dmg, 10s) and the boss's next attack is delayed 2s. Getting hit mid-air cancels the slam. No fall damage."],
+  ["Bounce", "Press R again right after a slam lands to bounce back up to the height you slammed from."],
+  ["Bomb", "F throws a bomb that explodes in a huge area. After a boss sword strike your bombs grow 1.5x for 5 seconds."],
+  ["Healing rings", "During the boss fight a ring appears every 5 seconds and fades after 10. Walk through it or shoot / bomb it to heal 10 HP (max 150). At full health, a ring resets your bomb cooldown instead. Rings block your bullets, but not the boss's."],
+  ["Boss stomp", "The boss leans back and stomps, sending a red shockwave ring outward. Jump over it."],
+];
+const TIPS = [
+  "Aim at the floor next to groups of tables — the blast hits all of them.",
+  "Climb high with wallruns and the grapple, then slam for the biggest ground pound.",
+  "Save a high slam for the boss to delay his attacks.",
+  "At full health, shoot rings from afar to reset your bomb.",
+  "Rings block your shots — don't stand behind one when shooting the boss.",
+  "Parry early in the boss fight: after 5 seconds it's locked.",
+];
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="mb-6">
+      <h3 className="mb-2 border-b border-hud/30 pb-1 text-lg font-black uppercase tracking-widest text-crosshair">{title}</h3>
+      {children}
+    </section>
+  );
+}
+
 function Home() {
   useTick(150);
-  const [tab, setTab] = useState<"main" | "controls" | "bots">("main");
+  const [tab, setTab] = useState<"main" | "controls" | "tutorial">("main");
   if (G.phase !== "home") return null;
   return (
-    <div className="fixed inset-0 z-20 flex items-center justify-center bg-hud-scrim font-mono text-hud">
-      <div className="w-full max-w-xl rounded-lg border-2 border-hud/30 bg-hud-panel p-8 text-center">
-        <h1 className="text-6xl font-black tracking-tight">Table Wars</h1>
-        <p className="mt-2 text-sm opacity-70">Break every table. Survive the red boss.</p>
-        {tab === "main" ? (
-          <div className="mx-auto mt-8 flex max-w-xs flex-col gap-3">
-            <button className={btnMain} onClick={playGame}>Play</button>
-            <button className={btnAlt} onClick={() => setTab("controls")}>Controls</button>
-            <button className={btnAlt} onClick={() => setTab("bots")}>Bot Types</button>
-            <button className={btnAlt} onClick={startTutorial}>Tutorial</button>
-          </div>
-        ) : (
-          <div className="mt-6">
-            <h2 className="mb-4 text-2xl font-black uppercase">{tab === "controls" ? "Controls" : "Bot Types"}</h2>
-            {tab === "controls" ? <ControlsList /> : <BotList />}
-            <button className={`${btnAlt} mt-6`} onClick={() => setTab("main")}>Back</button>
-          </div>
-        )}
+    <div className="fixed inset-0 z-20 flex bg-hud-scrim/40 font-mono text-hud">
+      <div className="flex w-full max-w-md flex-col justify-center bg-hud-panel/70 p-10 backdrop-blur-[2px]">
+        <h1 className="text-6xl font-black leading-none tracking-tight">Table<br />Wars</h1>
+        <p className="mt-3 text-sm opacity-70">Break every table. Survive the red boss.</p>
+        <div className="mt-10 flex flex-col gap-3">
+          <button className={btnMain} onClick={playGame}>Play</button>
+          <button className={tab === "controls" ? btnMain : btnAlt} onClick={() => setTab(tab === "controls" ? "main" : "controls")}>Controls &amp; Bot Types</button>
+          <button className={tab === "tutorial" ? btnMain : btnAlt} onClick={() => setTab(tab === "tutorial" ? "main" : "tutorial")}>Tutorial</button>
+        </div>
+        <p className="mt-10 text-xs opacity-60">Live: brown tables battling in the arena.</p>
       </div>
+      {tab !== "main" && (
+        <div className="m-6 flex-1 overflow-y-auto rounded-lg border-2 border-hud/30 bg-hud-panel p-8">
+          {tab === "controls" ? (
+            <>
+              <Section title="Controls"><ControlsList /></Section>
+              <Section title="Bot types"><BotList /></Section>
+            </>
+          ) : (
+            <>
+              <Section title="Basics">
+                <ol className="list-decimal space-y-1 pl-5 text-sm">
+                  {TUT_STEPS.map((s) => (
+                    <li key={s.title}><b className="uppercase">{s.title}</b> — <span className="opacity-80">{s.text.replace(/ ?Press ENTER to (continue|finish)\./, "")}</span></li>
+                  ))}
+                </ol>
+                <button className={`${btnMain} mt-4`} onClick={startTutorial}>Start interactive tutorial</button>
+              </Section>
+              <Section title="Advanced">
+                <ul className="space-y-3 text-sm">
+                  {ADVANCED.map(([k, d]) => (
+                    <li key={k}><b className="uppercase">{k}</b> — <span className="opacity-80">{d}</span></li>
+                  ))}
+                </ul>
+              </Section>
+              <Section title="Tips">
+                <ul className="list-disc space-y-1 pl-5 text-sm opacity-90">
+                  {TIPS.map((t) => <li key={t}>{t}</li>)}
+                </ul>
+              </Section>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
