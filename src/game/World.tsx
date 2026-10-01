@@ -5,7 +5,7 @@ import * as THREE from "three";
 import {
   G, MAG, FIRE_INTERVAL, DMG, PARRY_WINDOW, PARRY_CD, BUFF_TIME, DASH_CD, AIR_JUMPS, AIR_DASHES,
   BOMB_CD, BOMB_CD_BUFF, TABLE_HP, TABLE_CAP, BOSS_HITS, BOSS_WARN, setLocker,
-  MAP, PARRY_LOCK_AT, TUT_STEPS, finishTutorial,
+  MAP, PARRY_LOCK_AT, TUT_STEPS, finishTutorial, MAX_HP, PARRY_DMG,
 } from "./state";
 import { Room, ROOM, SOLIDS } from "./Room";
 import { tableWood } from "./textures";
@@ -45,17 +45,25 @@ const AOE_DMG = 30;
 const SWORD_R = 15;
 const STUN_TIME = 1;
 const BOMB_BIG_TIME = 5;
-const SUMMON_HP = 5;
-const PLATE_R = BOSS_S * 3;
-const PLATE_HIT_R = PLATE_R * 2;
-const PLATE_DMG = 25;
-const PLATE_SPEED = 190;
+const SUMMON_HP = 2.5;
 const WAVE_H = 0.5 * 3.45 * TABLE_S; // half a table tall
 const WAVE_SPEED = 140;
 const WAVE_DMG = 20;
-const HEALTH_AMOUNT = 30;
-const HEALTH_INTERVAL = 10;
-const HEALTH_R = 7;
+const HEALTH_AMOUNT = 10;
+const HEALTH_INTERVAL = 5;
+const HEALTH_LIFE = 10;
+const HEALTH_R = (TABLE_W * 1.5) / 2; // ring diameter = 1.5 table lengths
+const BULLET_AOE_R = TABLE_W / 2; // splinter blast diameter = one brown table
+const BOSS_H = 3.45 * BOSS_S; // boss table height
+const SLAM_SPEED = BOT_BULLET_SPEED * 2;
+const BOUNCE_WIN = 0.8;
+// ground pound tiers by drop height (diameters; max = 1.5 boss-table lengths)
+const SLAM_TIERS = [
+  { maxH: BOSS_H / 2, d: TABLE_W * 1.5, dmg: 5, cd: 1 },
+  { maxH: BOSS_H, d: TABLE_W * 3, dmg: 5, cd: 2 },
+  { maxH: BOSS_H * 2, d: TABLE_W * 4, dmg: 10, cd: 5 },
+  { maxH: Infinity, d: 6 * BOSS_S * 1.5, dmg: 25, cd: 10 },
+];
 const R = ROOM.r;
 const UP = new THREE.Vector3(0, 1, 0);
 
@@ -115,6 +123,15 @@ function segSolids(a: THREE.Vector3, b: THREE.Vector3) {
     best = Math.min(best, segAABB(a, b, _mn, _mx));
   }
   return best;
+}
+const _la = new THREE.Vector3(), _lb = new THREE.Vector3(), _bmin = new THREE.Vector3(), _bmax = new THREE.Vector3();
+// segment vs a (yaw-rotated) table body box; s = table scale, y = feet height
+function segTable(a: THREE.Vector3, b: THREE.Vector3, at: THREE.Vector3, y: number, yaw: number, s: number) {
+  _la.subVectors(a, at).setY(a.y - y).applyAxisAngle(UP, -yaw);
+  _lb.subVectors(b, at).setY(b.y - y).applyAxisAngle(UP, -yaw);
+  _bmin.set(-3.1 * s, 0, -2.1 * s);
+  _bmax.set(3.1 * s, 3.6 * s, 2.1 * s);
+  return segAABB(_la, _lb, _bmin, _bmax);
 }
 const overlapXZ = (p: THREE.Vector3, s: (typeof SOLIDS)[number], r: number) =>
   Math.abs(p.x - s.x) < s.hw + r && Math.abs(p.z - s.z) < s.hd + r;
@@ -204,18 +221,20 @@ export function World() {
   const tables = useMemo(() => Array.from({ length: TABLE_CAP }, newTable), []);
   const splinters = useMemo<Splinter[]>(() => [], []);
   const bomb = useRef({ alive: false, pos: new THREE.Vector3(), vel: new THREE.Vector3() });
-  const booms = useMemo(() => Array.from({ length: 4 }, () => ({ t: 0, pos: new THREE.Vector3(), r: BOMB_R })), []);
+  const booms = useMemo(() => Array.from({ length: 24 }, () => ({ t: 0, pos: new THREE.Vector3(), r: BOMB_R })), []);
   const hazards = useMemo<Hazard[]>(() => Array.from({ length: 8 }, () => ({ active: false, kind: "aoe", t: 0, total: 1, fx: 0, x: 0, z: 0, a0: 0 })), []);
   const blues = useMemo(() => Array.from({ length: BLUE_N }, () => ({ alive: false, pos: new THREE.Vector3(), dash: new THREE.Vector3(), hp: BLUE_HP, hitCd: 0, dashT: 8, yaw: 0 })), []);
   const blueT = useRef(6);
   const summonT = useRef(10);
   const healthT = useRef(HEALTH_INTERVAL);
-  const health = useMemo(() => Array.from({ length: 16 }, () => ({ active: false, pos: new THREE.Vector3() })), []);
+  const health = useMemo(() => Array.from({ length: 16 }, () => ({ active: false, pos: new THREE.Vector3(), t: 0 })), []);
+  const slam = useRef({ on: false, fromY: 0, h: 0 });
+  const bounce = useRef({ t: 0, y: 0 });
+  const demoAng = useRef(0);
   const healthRefs = useRef<(THREE.Group | null)[]>([]);
   const blueTop = useRef<THREE.InstancedMesh>(null);
   const blueLeg = useRef<THREE.InstancedMesh>(null);
-  const boss = useRef({ landed: false, y: ROOM.h, vy: 0, pos: new THREE.Vector3(), bulletT: 1, specialT: 2, next: "sword" as "sword" | "stomp", quarterT: 3, aoeT: 5, yaw: 0 });
-  const plate = useRef({ alive: false, pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3() });
+  const boss = useRef({ landed: false, y: ROOM.h, vy: 0, pos: new THREE.Vector3(), bulletT: 1, specialT: 2, next: "sword" as "sword" | "stomp", quarterT: 3, aoeT: 5, yaw: 0, lockT: 0 });
   const waves = useMemo(() => Array.from({ length: 6 }, () => ({ active: false, r: 0, x: 0, z: 0, hit: false })), []);
   const waveRefs = useRef<(THREE.Mesh | null)[]>([]);
   const lastRespawn = useRef(0);
@@ -230,7 +249,6 @@ export function World() {
   const bInst = useRef<THREE.InstancedMesh>(null);
   const splI = useRef<THREE.InstancedMesh>(null);
   const bombMesh = useRef<THREE.Mesh>(null);
-  const plateRef = useRef<THREE.Mesh>(null);
   const boomRefs = useRef<(THREE.Mesh | null)[]>([]);
   const hazRefs = useRef<({ disc: THREE.Mesh | null; sector: THREE.Mesh | null; sword: THREE.Group | null })[]>(
     Array.from({ length: 8 }, () => ({ disc: null, sector: null, sword: null })),
@@ -268,16 +286,17 @@ export function World() {
   };
   const damagePlayer = (d: number, force = false) => {
     if (!force && G.buff > 0) return;
+    if (slam.current.on) { slam.current.on = false; G.slamming = false; vy.current = 0; } // hit mid-air cancels the slam
     G.playerHp = Math.max(0, G.playerHp - d);
     G.hurtFlash = 0.25;
     if (G.playerHp <= 0) {
       if (G.mode === "tutorial") {
-        G.playerHp = 100;
+        G.playerHp = MAX_HP;
         return;
       }
       if (G.stage !== "tables") {
         // checkpoint: back to the boss warning, parry stays compromised
-        Object.assign(G, { playerHp: 100, stage: "incoming", bossWarn: BOSS_WARN, bossHits: 0, bossTime: 0, respawnMsg: 2.5, stun: 0 });
+        Object.assign(G, { playerHp: MAX_HP, stage: "incoming", bossWarn: BOSS_WARN, bossHits: 0, bossTime: 0, respawnMsg: 2.5, stun: 0 });
         G.respawnToken++;
         return;
       }
@@ -339,11 +358,58 @@ export function World() {
     for (const u of blues) if (u.alive && u.pos.distanceTo(at) < br) { u.alive = false; burst(tmpV.copy(u.pos).setY(4), TABLE_S, 5); }
     if (bossLive() && tmpV.set(boss.current.pos.x, boss.current.y + 10, boss.current.pos.z).distanceTo(at) < br + 30)
       hitBoss((BOMB_DMG / DMG) * (buffed ? 2 : 1));
-    const bm = booms.find((x) => x.t <= 0) ?? booms[0]!;
-    bm.t = 0.5;
-    bm.pos.copy(at);
-    bm.r = br;
+    ringsIn(at, br);
+    boomFx(at, br);
     G.shake = 0.6;
+  };
+  const boomFx = (at: THREE.Vector3, r: number, t = 0.5) => {
+    const bm = booms.find((x) => x.t <= 0) ?? booms[0]!;
+    bm.t = t;
+    bm.pos.copy(at);
+    bm.r = r;
+  };
+  // healing ring: heal, or (when full) reset the bomb cooldown. Returns true if consumed.
+  const collectRing = (h: (typeof health)[number]) => {
+    if (!h.active || G.stage !== "boss") return false;
+    if (G.playerHp < MAX_HP) G.playerHp = Math.min(MAX_HP, G.playerHp + HEALTH_AMOUNT);
+    else if (G.bombCd > 0) G.bombCd = 0;
+    else return false;
+    h.active = false;
+    return true;
+  };
+  const ringsIn = (at: THREE.Vector3, r: number) => {
+    for (const h of health) if (h.active && Math.hypot(h.pos.x - at.x, h.pos.z - at.z) < r + HEALTH_R && at.y < r + 4) collectRing(h);
+  };
+  const distToBossBox = (at: THREE.Vector3) => {
+    bossBox(_mn, _mx);
+    return tmpV.copy(at).clamp(_mn, _mx).distanceTo(at);
+  };
+  // splinter blast: equal damage to everything inside (never the shooter)
+  const bulletExplode = (at: THREE.Vector3, dmg: number, direct: Table | null, directBlue: (typeof blues)[number] | null, directBoss: boolean) => {
+    let any = false;
+    for (const t of tables) {
+      if (!t.alive) continue;
+      if (t === direct || t.pos.distanceTo(tmpV.copy(at).setY(at.y)) < BULLET_AOE_R + 3 * t.s && Math.abs(at.y - (t.pos.y + 1.7 * t.s)) < BULLET_AOE_R + 2 * t.s) {
+        hitTable(t, dmg);
+        any = true;
+      }
+    }
+    for (const u of blues) {
+      if (!u.alive) continue;
+      if (u === directBlue || (Math.hypot(u.pos.x - at.x, u.pos.z - at.z) < BULLET_AOE_R + 3 * TABLE_S && at.y < BULLET_AOE_R + 4 * TABLE_S)) {
+        u.hp -= dmg;
+        any = true;
+        G.hitFlash = 0.15;
+        if (u.hp <= 0) { u.alive = false; burst(tmpV.copy(u.pos).setY(4), TABLE_S, 5); }
+      }
+    }
+    if (bossLive() && boss.current.landed && (directBoss || distToBossBox(at) < BULLET_AOE_R)) {
+      hitBoss(dmg > DMG ? 2 : 1);
+      any = true;
+    }
+    ringsIn(at, BULLET_AOE_R);
+    if (any) G.hits++;
+    boomFx(at, BULLET_AOE_R, 0.25);
   };
   const addHazard = (kind: Hazard["kind"], x: number, z: number, t: number) => {
     const h = hazards.find((q) => !q.active);
@@ -423,7 +489,24 @@ export function World() {
           G.grappling = true;
         }
       }
-      if (e.code === "KeyR" && G.buff <= 0 && G.ammo < MAG && G.reloading <= 0) G.reloading = 1.5;
+      if (e.code === "KeyR") {
+        const p = pos.current;
+        if (bounce.current.t > 0 && !slam.current.on) {
+          // double-tap R after a slam: bounce back up to the pre-slam height
+          const rise = Math.max(0, bounce.current.y - p.y);
+          vy.current = Math.sqrt(2 * GRAVITY * rise);
+          grounded.current = false;
+          bounce.current.t = 0;
+          G.bounceWin = 0;
+        } else if (!grounded.current && !slam.current.on && G.slamCd <= 0) {
+          let ground = 0;
+          for (const s of SOLIDS) if (s.y1 <= p.y + 0.01 && overlapXZ(p, s, PLAYER_R * 0.5)) ground = Math.max(ground, s.y1);
+          Object.assign(slam.current, { on: true, fromY: p.y, h: p.y - ground });
+          G.slamming = true;
+          G.grappling = false;
+          G.wallrun = false;
+        } else if (grounded.current && G.buff <= 0 && G.ammo < MAG && G.reloading <= 0) G.reloading = 1.5;
+      }
     };
     const ku = (e: KeyboardEvent) => {
       keys.current[e.code] = false;
@@ -493,8 +576,9 @@ export function World() {
       hazards.forEach((h) => (h.active = false));
       waves.forEach((w) => (w.active = false));
       bomb.current.alive = false;
-      plate.current.alive = false;
-      Object.assign(b, { landed: false, y: ROOM.h, vy: 0, bulletT: 1, specialT: 2, next: "sword", quarterT: 3, aoeT: 5 });
+      slam.current.on = false;
+      bounce.current.t = 0;
+      Object.assign(b, { landed: false, y: ROOM.h, vy: 0, bulletT: 1, specialT: 2, next: "sword", quarterT: 3, aoeT: 5, lockT: 0 });
       b.pos.set(0, 0, 0);
     };
     if (lastReset.current !== G.resetToken) {
@@ -532,6 +616,9 @@ export function World() {
       G.bombBig = Math.max(0, G.bombBig - dt);
       G.compromisedT = Math.max(0, G.compromisedT - dt);
       G.respawnMsg = Math.max(0, G.respawnMsg - dt);
+      G.slamCd = Math.max(0, G.slamCd - dt);
+      bounce.current.t = Math.max(0, bounce.current.t - dt);
+      G.bounceWin = bounce.current.t;
       if (G.parryLocked) G.parryWin = 0;
       const stunned = G.stun > 0;
       const buffed = G.buff > 0;
@@ -615,6 +702,13 @@ export function World() {
         }
       }
       if (v.length() > MAX_HSPEED) v.setLength(MAX_HSPEED);
+      if (slam.current.on) {
+        // ground pound: straight down at 2x bot-bullet speed
+        v.set(0, 0, 0);
+        vy.current = -SLAM_SPEED;
+        G.wallrun = false;
+        G.grappling = false;
+      }
 
       // --- integrate + collide ---
       const prevY = p.y;
@@ -631,6 +725,29 @@ export function World() {
       if (vy.current <= 0 && p.y <= sup + 0.001) {
         p.y = sup;
         if (vy.current < 0) vy.current = 0;
+        if (slam.current.on) {
+          slam.current.on = false;
+          G.slamming = false;
+          const tier = SLAM_TIERS.findIndex((q) => slam.current.h < q.maxH);
+          const q = SLAM_TIERS[tier]!;
+          const r = q.d / 2;
+          for (const t of tables) if (t.alive && Math.hypot(t.pos.x - p.x, t.pos.z - p.z) < r + 3 * t.s && t.pos.y < p.y + r) hitTable(t, q.dmg);
+          for (const u of blues) {
+            if (!u.alive || Math.hypot(u.pos.x - p.x, u.pos.z - p.z) >= r + 3 * TABLE_S) continue;
+            u.hp -= q.dmg;
+            if (u.hp <= 0) { u.alive = false; burst(tmpV.copy(u.pos).setY(4), TABLE_S, 5); }
+          }
+          if (bossLive() && b.landed && distToBossBox(tmpV.copy(p).setY(p.y + 1)) < r) {
+            hitBoss(Math.round(q.dmg / DMG));
+            if (tier === SLAM_TIERS.length - 1) b.lockT = 2; // next boss attack waits 2s
+          }
+          ringsIn(p, r);
+          boomFx(tmpV.copy(p).setY(p.y + 0.5), r, 0.4);
+          G.slamCd = q.cd;
+          G.shake = Math.max(G.shake, 0.3 + tier * 0.2);
+          bounce.current.t = BOUNCE_WIN;
+          bounce.current.y = slam.current.fromY;
+        }
         if (!grounded.current) {
           grounded.current = true;
           G.wallrun = false;
@@ -743,8 +860,10 @@ export function World() {
           if (h) {
             h.pos.copy(randomFloor(p));
             h.active = true;
+            h.t = HEALTH_LIFE;
           }
         }
+        for (const h of health) if (h.active && (h.t -= dt) <= 0) h.active = false;
         if (G.bossTime >= PARRY_LOCK_AT && !G.parryLocked) {
           G.parryLocked = true;
           G.parryWin = 0;
@@ -772,7 +891,9 @@ export function World() {
             const aim = cam.position.clone().setY(cam.position.y - 0.5).sub(from).normalize();
             spawnBullet(botPool, from, aim.multiplyScalar(BOT_BULLET_SPEED), BOSS_BULLET_DMG, 3);
           }
-          b.specialT -= dt;
+          const bossAtk = b.lockT <= 0;
+          b.lockT = Math.max(0, b.lockT - dt);
+          if (bossAtk) b.specialT -= dt;
           if (b.specialT <= 0) {
             if (b.next === "sword") {
               const rp = recentPos.current[0]?.p ?? p;
@@ -784,7 +905,7 @@ export function World() {
             }
             b.next = b.next === "sword" ? "stomp" : "sword";
           }
-          b.quarterT -= dt;
+          if (bossAtk) b.quarterT -= dt;
           if (b.quarterT <= 0) {
             b.quarterT = 4;
             addHazard("quarter", 0, 0, 2.5);
@@ -812,7 +933,7 @@ export function World() {
               spawnTable(at, true);
             }
           }
-          b.aoeT -= dt;
+          if (bossAtk) b.aoeT -= dt;
           if (b.aoeT <= 0) {
             b.aoeT = 7;
             addHazard("aoe", p.x, p.z, 3);
@@ -821,13 +942,8 @@ export function World() {
       }
 
       // Collect health rings only while fighting the boss; never exceed full health.
-      if (G.stage === "boss" && G.playerHp < 100) {
-        for (const h of health) {
-          if (h.active && p.y < 8 && Math.hypot(p.x - h.pos.x, p.z - h.pos.z) < HEALTH_R) {
-            G.playerHp = Math.min(100, G.playerHp + HEALTH_AMOUNT);
-            h.active = false;
-          }
-        }
+      if (G.stage === "boss") {
+        for (const h of health) if (h.active && p.y < 8 && Math.hypot(p.x - h.pos.x, p.z - h.pos.z) < HEALTH_R) collectRing(h);
       }
 
       // --- blue chaser tables ---
@@ -873,11 +989,6 @@ export function World() {
               G.bombBig = BOMB_BIG_TIME;
               G.shake = Math.max(G.shake, 0.4);
             } else if (h.kind === "stomp") {
-              const dir = new THREE.Vector3(Math.sin(b.yaw), 0, Math.cos(b.yaw));
-              plate.current.alive = true;
-              plate.current.pos.set(b.pos.x, PLATE_R, b.pos.z).addScaledVector(dir, PLATE_R + BOSS_S * 3);
-              plate.current.prev.copy(plate.current.pos);
-              plate.current.vel.copy(dir).multiplyScalar(PLATE_SPEED);
               addWave(b.pos.x, b.pos.z);
               G.shake = Math.max(G.shake, 0.8);
             } else {
@@ -893,20 +1004,6 @@ export function World() {
           h.fx -= dt;
           if (h.fx <= 0) h.active = false;
         }
-      }
-
-      // --- boss stomp plate (continuous collision) ---
-      if (plate.current.alive) {
-        const q = plate.current;
-        q.prev.copy(q.pos);
-        q.pos.addScaledVector(q.vel, dt);
-        const playerBody = tmpV.copy(cam.position).setY(cam.position.y - 1);
-        const hitPlayer = segSphere(q.prev, q.pos, playerBody, PLATE_HIT_R + PLAYER_R) < Infinity;
-        const hitWorld = Math.hypot(q.pos.x, q.pos.z) > R - PLATE_R || segSolids(q.prev, q.pos) < Infinity;
-        if (hitPlayer) {
-          damagePlayer(PLATE_DMG);
-          q.alive = false;
-        } else if (hitWorld) q.alive = false;
       }
 
       // --- bomb (sub-stepped continuous collision) ---
@@ -949,7 +1046,7 @@ export function World() {
       if (G.mode === "game" && G.stage === "tables" && G.capReached && aliveCount() === 0 && G.bluesAlive === 0) {
         G.stage = "incoming";
         G.bossWarn = BOSS_WARN;
-        G.playerHp = 100;
+        G.playerHp = MAX_HP;
       }
 
       // --- tutorial ---
@@ -1006,43 +1103,56 @@ export function World() {
           bl.pos.addScaledVector(bl.vel, dt);
           bl.life -= dt;
           const tSolid = segSolids(bl.prev, bl.pos);
+          // floor + outer wall are solid too
+          let tWorld = tSolid;
+          if (bl.pos.y <= 0 && bl.prev.y > 0) tWorld = Math.min(tWorld, bl.prev.y / (bl.prev.y - bl.pos.y));
+          if (Math.hypot(bl.pos.x, bl.pos.z) >= R - 0.5) tWorld = Math.min(tWorld, 1);
           if (isPlayer) {
             let bestT = Infinity;
             let bestTable: Table | null = null;
+            let blueHit: (typeof blues)[number] | null = null;
             for (const t of tables) {
               if (!t.alive) continue;
-              const tt = segSphere(bl.prev, bl.pos, tmpV.copy(t.pos).setY(t.pos.y + 2.6 * t.s), 3.4 * t.s);
-              if (tt < bestT) {
-                bestT = tt;
-                bestTable = t;
-              }
+              const tt = segTable(bl.prev, bl.pos, t.pos, t.pos.y, t.yaw, t.s);
+              if (tt < bestT) { bestT = tt; bestTable = t; }
+            }
+            for (const u of blues) {
+              if (!u.alive) continue;
+              const tt = segTable(bl.prev, bl.pos, u.pos, 0, u.yaw, TABLE_S);
+              if (tt < bestT) { bestT = tt; bestTable = null; blueHit = u; }
             }
             let bossT = Infinity;
             if (bossLive() && b.landed) {
               bossBox(_mn, _mx);
               bossT = segAABB(bl.prev, bl.pos, _mn, _mx);
             }
-            let blueHit: (typeof blues)[number] | null = null;
-            for (const u of blues) {
-              if (!u.alive) continue;
-              const tt = segSphere(bl.prev, bl.pos, tmpV.copy(u.pos).setY(2.6 * TABLE_S), 3.4 * TABLE_S);
-              if (tt < bestT) { bestT = tt; bestTable = null; blueHit = u; }
+            // healing rings block player bullets
+            let ringT = Infinity;
+            let ringHit: (typeof health)[number] | null = null;
+            if (G.stage === "boss") for (const h of health) {
+              if (!h.active) continue;
+              _mn.set(h.pos.x - HEALTH_R, 0, h.pos.z - HEALTH_R);
+              _mx.set(h.pos.x + HEALTH_R, 2.5, h.pos.z + HEALTH_R);
+              const tt = segAABB(bl.prev, bl.pos, _mn, _mx);
+              if (tt < ringT) { ringT = tt; ringHit = h; }
             }
-            if (Math.min(bestT, bossT) < tSolid) {
+            const tHit = Math.min(bestT, bossT, ringT, tWorld);
+            if (tHit < Infinity) {
               bl.alive = false;
-              G.hits++;
-              if (bossT < bestT) hitBoss(bl.dmg > DMG ? 2 : 1);
-              else if (bestTable) hitTable(bestTable, bl.dmg);
-              else if (blueHit) {
-                blueHit.hp -= bl.dmg;
-                G.hitFlash = 0.15;
-                if (blueHit.hp <= 0) { blueHit.alive = false; burst(tmpV.copy(blueHit.pos).setY(4), TABLE_S, 5); }
-              }
-            } else if (tSolid < Infinity) bl.alive = false;
+              const at = bl.prev.clone().lerp(bl.pos, tHit);
+              if (at.y < 0.2) at.y = 0.2;
+              if (ringHit && ringT === tHit) collectRing(ringHit);
+              bulletExplode(
+                at, bl.dmg,
+                bestT === tHit ? bestTable : null,
+                bestT === tHit ? blueHit : null,
+                bossT === tHit,
+              );
+            }
           } else {
             const body = tmpV.copy(cam.position).setY(cam.position.y - 1);
             const tp = segSphere(bl.prev, bl.pos, body, 1.6 + BOT_BULLET_HALF);
-            if (tp < tSolid && G.phase === "playing") {
+            if (tp < tWorld && G.phase === "playing") {
               bl.alive = false;
               if (G.parryWin > 0 && !G.parryLocked) {
                 let tgt: THREE.Vector3 | null = null;
@@ -1060,13 +1170,13 @@ export function World() {
                 }
                 const from = cam.position.clone();
                 const dir = tgt ? tgt.sub(from).normalize() : bl.vel.clone().negate().normalize();
-                spawnBullet(playerPool, from, dir.multiplyScalar(BULLET_SPEED), DMG * 2, 0.4);
+                spawnBullet(playerPool, from, dir.multiplyScalar(BULLET_SPEED), PARRY_DMG, 0.4);
                 G.parryWin = 0;
                 G.buff = BUFF_TIME;
                 G.parryFlash = 0.3;
                 G.parries++;
               } else damagePlayer(bl.dmg);
-            } else if (tSolid < Infinity) bl.alive = false;
+            } else if (tWorld < Infinity) bl.alive = false;
           }
           const q = bl.pos;
           if (bl.alive && (bl.life <= 0 || q.y < 0 || q.y > ROOM.h || Math.hypot(q.x, q.z) > R)) bl.alive = false;
@@ -1207,12 +1317,6 @@ export function World() {
       bossRef.current.rotation.y = b.yaw;
       const stomp = hazards.find((h) => h.active && h.kind === "stomp" && h.t > 0);
       bossRef.current.rotation.x = stomp ? -Math.sin((1 - stomp.t / stomp.total) * Math.PI * 0.5) * 0.35 : 0;
-    }
-    if (plateRef.current) {
-      plateRef.current.visible = plate.current.alive;
-      plateRef.current.position.copy(plate.current.pos);
-      // flat face (cylinder axis) points along the velocity
-      if (plate.current.vel.lengthSq() > 0) plateRef.current.quaternion.setFromUnitVectors(UP, tmpV.copy(plate.current.vel).normalize());
     }
     waves.forEach((w, i) => {
       const m = waveRefs.current[i];
@@ -1373,10 +1477,6 @@ export function World() {
           </mesh>
         </group>
       ))}
-      <mesh ref={plateRef} visible={false} castShadow>
-        <cylinderGeometry args={[PLATE_R, PLATE_R, 2.2, 48]} />
-        <meshStandardMaterial color="#e8edf0" roughness={0.28} metalness={0.18} />
-      </mesh>
       <mesh ref={ropeRef} visible={false}>
         <cylinderGeometry args={[0.05, 0.05, 1, 6]} />
         <meshStandardMaterial color="#e8d9b0" />
